@@ -16,13 +16,13 @@ control panel.
 STATUS: ۴۲۷، TEST_MATRIX: ۴۳۱). منبع حقیقت **سورس** است:
 
 ```bash
-python3 tools/gen_status.py --check   # 42 modules, 448 tests declared
+python3 tools/gen_status.py --check   # 42 modules, 449 tests declared
 python3 tools/lint_docs.py            # prose may not drift from source
 ```
 
-* **۴۴۸** تست Rust در سورس **نوشته** شده (`#[test]`). آخرین اجرای سبزِ
+* **۴۴۹** تست Rust در سورس **نوشته** شده (`#[test]`). آخرین اجرای سبزِ
   baseline ثبت‌شده ۲۰۲۶-۰۹-۰۹ روی Rust 1.98.1/لینوکس **۴۳۱ تست** بود؛
-  ۱۷ تست/تغییر تستیِ فعلی پس از آن baseline هنوز با cargo اجرا نشده‌اند
+  ۱۸ تست/تغییر تستیِ فعلی پس از آن baseline هنوز با cargo اجرا نشده‌اند
   (`cargo` در این محیط موجود نیست).
 * **۳۷۵** چک jsdom/Node داشبورد (با regression XSS، raw-TOML confirmation و انتظار boot مقاوم) — این عدد
   در همین patch در ۲۰۲۶-۰۹-۱۲ **اجرا و پاس شد** (`cd uitest && npm test`).
@@ -296,7 +296,7 @@ The relay listens on `127.0.0.1` only.
 This is a first pass, not a finished, field-tested tool. Two tiers:
 
 - **[IMPLEMENTED / verification-dependent]** — implementation and unit tests
-  are present in-tree; the current source declares **448** `#[test]`
+  are present in-tree; the current source declares **449** `#[test]`
   functions. This is not evidence that the current checkout was executed:
   the last recorded Rust baseline is **431/431**, while 16 current tests or
   test changes remain `[UNVERIFIED]` because this environment has no
