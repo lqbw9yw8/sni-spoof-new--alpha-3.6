@@ -847,7 +847,10 @@ fn backend_main() {
                     result
                 })
             })
-            .expect("spawn capture thread")
+            .unwrap_or_else(|e| {
+                log::error!("failed to spawn capture thread: {e}");
+                std::process::exit(1);
+            })
     }
 
     // injection_delay_min_ms / injection_delay_max_ms are part of the
@@ -1111,7 +1114,10 @@ fn backend_main() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("tokio runtime");
+        .unwrap_or_else(|e| {
+            log::error!("failed to build tokio runtime: {e}");
+            std::process::exit(1);
+        });
  
     rt.block_on(async {
         tokio::select! {

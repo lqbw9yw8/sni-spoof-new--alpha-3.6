@@ -1,0 +1,13 @@
+/target/
+*.exe
+*.pdb
+dpi_guard.dns_cache
+dpi_guard.toml
+*.log
+.idea/
+.vscode/
+uitest/node_modules/
+dist/
+out/
+coverage/
+

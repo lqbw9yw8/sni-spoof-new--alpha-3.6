@@ -1,7 +1,7 @@
 # dpi_guard (Rust)
 
 Modular DPI-evasion engine. Crate name: `dpi_guard` (GitHub repo:
-[`lqbw9yw8/sni-spoof-new--alpha-3.12`](https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.12)).
+[`lqbw9yw8/sni-spoof-new--alpha-3.6`](https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.6)).
 Windows-only for packet capture/injection (WinDivert);
 every pure-logic module builds and tests on Linux/macOS/CI.
 
@@ -86,10 +86,10 @@ so a filter may whitelist the connection.
 (دکمهٔ سبز **Code → Download ZIP**):
 
 **Latest zip (branch `main`):**
-https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.12/archive/refs/heads/main.zip
+https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.6/archive/refs/heads/main.zip
 
 **Browse on GitHub:**
-https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.12/tree/main
+https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.6/tree/main
 
 ZIP را باز کن. پوشه را جایی ساده بگذار، مثلاً `C:\dpi_guard`.
 
@@ -100,15 +100,15 @@ Unzip it. Put the folder somewhere simple, e.g. `C:\dpi_guard`.
 > **الف) روی خود ویندوز دابل‌کلیک:** `build-windows.bat` (Rust باید نصب باشد).
 >
 > **ب) گیت‌هاب برایت بسازد:** workflow فعالِ
-> [`.github/workflows/build-windows.yml`](.github/workflows/build-windows.yml)
-> روی هر push اجرا می‌شود. در تب **Actions**، آرتیفکت `dpi_guard-windows` را
+> [`ci/build-windows.yml`](ci/build-windows.yml)
+> روی هر push اجرا می‌شود (برای فعال‌سازی در GitHub، آن را به `.github/workflows/build-windows.yml` کپی کنید). در تب **Actions**، آرتیفکت `dpi_guard-windows` را
 > دانلود کن. WinDivert داخل آن نیست.
 >
 > There is no pre-built `.exe` in git. Run `build-windows.bat` on Windows,
-> or let the active `.github/workflows/build-windows.yml` workflow build the
-> artifact. The release workflow is tag-driven and publishes SHA-256 sums.
+> or let the active [`ci/build-windows.yml`](ci/build-windows.yml) workflow build the
+> artifact (copy to `.github/workflows/build-windows.yml` to enable on GitHub). The release workflow is tag-driven and publishes SHA-256 sums.
 > The old `ci/*.yml` files are templates kept for reference; they are not the
-> workflows GitHub executes.
+> workflows GitHub executes until copied.
 
 
 ### ۲) ساختن برنامه / Build the program

@@ -35,7 +35,7 @@ use std::time::Duration;
 /// Note: the check reads the repo's GitHub *releases*; until a release is
 /// published there it reports "no release found", which is honest but not
 /// an update signal.
-pub const DEFAULT_UPDATE_REPO: &str = "lqbw9yw8/sni-spoof-new-5.6";
+pub const DEFAULT_UPDATE_REPO: &str = "lqbw9yw8/sni-spoof-new--alpha-3.6";
 
 /// Longest accepted `owner/repo`. GitHub caps each side at 100 chars; 200
 /// plus the separator is generous and keeps the formatted URL bounded.
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn valid_repo_slugs_are_accepted() {
-        assert!(validate_repo_slug("lqbw9yw8/sni-spoof-new-5.6").is_ok());
+        assert!(validate_repo_slug("lqbw9yw8/sni-spoof-new--alpha-3.6").is_ok());
         assert!(validate_repo_slug("owner/repo").is_ok());
         assert!(validate_repo_slug("Owner_1/repo.name-2").is_ok());
         // Surrounding whitespace is trimmed, not rejected.
@@ -321,7 +321,7 @@ mod tests {
         let version = env!("CARGO_PKG_VERSION");
         let major_minor: Vec<&str> = version.split('.').take(2).collect();
         assert_eq!(
-            DEFAULT_UPDATE_REPO, "lqbw9yw8/sni-spoof-new-5.6",
+            DEFAULT_UPDATE_REPO, "lqbw9yw8/sni-spoof-new--alpha-3.6",
             "update repo must name the repository this crate ships from \
              (crate version {version}, major.minor {major_minor:?})"
         );
