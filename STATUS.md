@@ -47,17 +47,17 @@ Rust 1.98.1 (لینوکس) اجرا و سبز شد؛ در محیط ممیزی ۲
 cargo fmt --all -- --check   # clean
 cargo clippy --all-targets -- -D warnings   # 0 error
 cargo test --all-targets     # آخرین اجرای قبل از پچ‌های SENTRY: 431 passed; 0 failed
-python3 tools/gen_status.py  # current source: 42 modules, 448 tests declared, 0 dead fns
+python3 tools/gen_status.py  # current source: 42 modules, 449 tests declared, 0 dead fns
 
-# اجرای واقعی در ممیزی ۲۰۲۶-۰۹-۱۲ این patch:
+# اجرای واقعی در ممیزی ۲۰۲۶-۰۹-۱۳ این patch:
 cd uitest && npm test                       # 375 passed; 0 failed  ✅
 python3 tools/gen_status.py --check        # up to date            ✅
 python3 tools/lint_docs.py                 # 0 parity violations   ✅
 ```
 
 > ⚠️ عددهای ۳۴۴، ۳۶۹، ۴۲۷ و ۴۳۱ که پیش‌تر در اسناد بودند تاریخی‌اند
-> و برای ادعاهای فعلی استفاده نمی‌شوند. `tools/gen_status.py` اکنون **۴۴۸**
-> تست اعلام‌شده را گزارش می‌کند؛ ۱۷ تست/تغییر تستیِ پس از baseline در این
+> و برای ادعاهای فعلی استفاده نمی‌شوند. `tools/gen_status.py` اکنون **۴۴۹**
+> تست اعلام‌شده را گزارش می‌کند؛ ۱۸ تست/تغییر تستیِ پس از baseline در این
 > checkout هنوز با cargo اجرا نشده‌اند.
 
 ---
@@ -124,9 +124,9 @@ ECH واقعی از نظر ریاضی خراب بود؛ ریشه‌ها با ش�
 
 > **⬆️ تکمیل‌شده در دور ممیزی ۲۰۲۶-۰۹-۰۹:** این دور اکنون اجرا شد —
 > ۹ شکست (عمدتاً ریاضیاتِ `hpke.rs`) پیدا و رفع شد؛ جدول بالا برای
-> مرور تاریخی نگه داده شده است. اعداد فعلی: **۴۴۸ تست اعلام‌شده در سورس و
+> مرور تاریخی نگه داده شده است. اعداد فعلی: **۴۴۹ تست اعلام‌شده در سورس و
 > ۴۲ ماژول**؛ آخرین اجرای سبزِ baseline در ۲۰۲۶-۰۹-۰۹، ۴۳۱ تست تاریخی بود؛
-> ۱۷ تست/تغییر پس از آن baseline هنوز با cargo اجرا نشده‌اند. clippy = ۰ و fmt = پاک
+> ۱۸ تست/تغییر پس از آن baseline هنوز با cargo اجرا نشده‌اند. clippy = ۰ و fmt = پاک
 > مربوط به همان baseline هستند. جزئیات در بخش «ممیزی Master Prompt V2» بالای همین فایل.
 
 **تداخل‌های رفع‌شده در حسابرسی هماهنگی:**
@@ -164,8 +164,8 @@ ECH واقعی از نظر ریاضی خراب بود؛ ریشه‌ها با ش�
 | معیار | مقدار |
 |---|---:|
 | ماژول‌های Rust | **۴۲** (طبق `tools/gen_status.py`) |
-| `#[test]` تعریف‌شده در کد Rust | **۴۴۸** (طبق `tools/gen_status.py`) |
-| تست‌های **آخرین اجرای ثبت‌شده و پاس‌شده** (cargo test، لینوکس) | **۴۳۱ از ۴۳۱** ✅؛ ۱۷ تست/تغییر پس از آن [UNVERIFIED] |
+| `#[test]` تعریف‌شده در کد Rust | **۴۴۹** (طبق `tools/gen_status.py`) |
+| تست‌های **آخرین اجرای ثبت‌شده و پاس‌شده** (cargo test، لینوکس) | **۴۳۱ از ۴۳۱** ✅؛ ۱۸ تست/تغییر پس از آن [UNVERIFIED] |
 | توابع بدون هیچ فراخوان (Dead Functions) | **۰** ✅ (استاتیک) |
 | هشدار خطای clippy (-D warnings، --all-targets) | **۰** ✅ (اجرای ۲۰۲۶-۰۹-۰۹) |
 | `cargo fmt --check` | **پاک** ✅ (اجرای ۲۰۲۶-۰۹-۰۹) |

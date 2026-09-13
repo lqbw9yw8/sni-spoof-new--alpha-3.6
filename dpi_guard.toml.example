@@ -251,7 +251,7 @@ fake_resend_count = 1
 # could only ever fail. Note: until a release is published on that repo the
 # check honestly reports "no release found" instead of an update.
 enable_self_update = false
-update_repo = "lqbw9yw8/sni-spoof-new-5.5"
+update_repo = "lqbw9yw8/sni-spoof-new--alpha-3.6"
 
 # Auto-detect running proxy clients (v2rayN, Xray, sing-box, etc.)
 enable_client_detect = false

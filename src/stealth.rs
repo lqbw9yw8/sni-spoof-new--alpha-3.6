@@ -13,10 +13,11 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 pub fn add_dynamic_jitter() -> Duration {
-    let normal = Normal::new(20.0_f64, 10.0_f64).expect("valid normal params");
     let mut rng = rand::thread_rng();
-    let sample = normal.sample(&mut rng).max(0.0);
-    Duration::from_micros((sample * 1000.0) as u64)
+    let jitter = Normal::new(20.0_f64, 10.0_f64)
+        .map(|normal| normal.sample(&mut rng).max(0.0))
+        .unwrap_or(20.0);
+    Duration::from_micros((jitter * 1000.0) as u64)
 }
 
 pub fn add_random_padding(payload: &[u8]) -> Vec<u8> {

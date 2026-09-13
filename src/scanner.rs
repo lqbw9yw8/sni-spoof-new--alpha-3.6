@@ -428,7 +428,9 @@ impl SniPool {
                 return Some(&entry.sni);
             }
         }
-        Some(&self.entries.last().unwrap().sni)
+        // Fallback to last entry if floating-point rounding prevented selection.
+        // Safe because empty case already returned None above.
+        self.entries.last().map(|e| e.sni.as_str())
     }
 
     /// Least-recently-used selection.
@@ -521,18 +523,22 @@ pub fn rank_probes(results: &[ProbeResult]) -> Vec<RankedCandidate> {
 
 /// Well-known CDN edge IPs for common providers.
 pub fn known_cdn_edges(provider: &str) -> Vec<IpAddr> {
+    use std::net::{Ipv4Addr, IpAddr};
     match provider.to_lowercase().as_str() {
         "cloudflare" => vec![
-            "104.16.0.1".parse().unwrap(),
-            "104.16.1.1".parse().unwrap(),
-            "1.1.1.1".parse().unwrap(),
-            "1.0.0.1".parse().unwrap(),
+            IpAddr::V4(Ipv4Addr::new(104, 16, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(104, 16, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
         ],
         "fastly" => vec![
-            "151.101.1.1".parse().unwrap(),
-            "151.101.65.1".parse().unwrap(),
+            IpAddr::V4(Ipv4Addr::new(151, 101, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(151, 101, 65, 1)),
         ],
-        "akamai" => vec!["23.0.0.1".parse().unwrap(), "23.32.0.1".parse().unwrap()],
+        "akamai" => vec![
+            IpAddr::V4(Ipv4Addr::new(23, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(23, 32, 0, 1)),
+        ],
         _ => vec![],
     }
 }

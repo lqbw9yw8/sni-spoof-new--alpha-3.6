@@ -56,9 +56,10 @@ impl SessionTicketCache {
     pub fn put(&mut self, sni: &str, ticket: Vec<u8>) {
         if let Some(existing) = self.tickets.get_mut(sni) {
             *existing = ticket;
-            let pos = self.tickets.get_index_of(sni).unwrap();
-            let last = self.tickets.len() - 1;
-            self.tickets.move_index(pos, last);
+            if let Some(pos) = self.tickets.get_index_of(sni) {
+                let last = self.tickets.len().saturating_sub(1);
+                self.tickets.move_index(pos, last);
+            }
             return;
         }
         if self.tickets.len() >= self.capacity {
@@ -69,7 +70,7 @@ impl SessionTicketCache {
 
     pub fn get(&mut self, sni: &str) -> Option<&Vec<u8>> {
         let pos = self.tickets.get_index_of(sni)?;
-        let last = self.tickets.len() - 1;
+        let last = self.tickets.len().saturating_sub(1);
         self.tickets.move_index(pos, last);
         self.tickets.get(sni)
     }

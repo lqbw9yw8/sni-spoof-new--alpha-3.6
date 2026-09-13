@@ -50,12 +50,18 @@ impl Fe {
         let mut w = [0u8; 32];
         w.copy_from_slice(b);
         w[31] &= 127;
+        // Manual byte array construction avoids try_into().unwrap() panic paths
+        // while keeping the same bit layout; slice ranges are fixed length.
         Fe([
-            u64::from_le_bytes(w[0..8].try_into().unwrap()) & MASK51,
-            (u64::from_le_bytes(w[6..14].try_into().unwrap()) >> 3) & MASK51,
-            (u64::from_le_bytes(w[12..20].try_into().unwrap()) >> 6) & MASK51,
-            (u64::from_le_bytes(w[19..27].try_into().unwrap()) >> 1) & MASK51,
-            (u64::from_le_bytes(w[24..32].try_into().unwrap()) >> 12) & MASK51,
+            u64::from_le_bytes([w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]]) & MASK51,
+            (u64::from_le_bytes([w[6], w[7], w[8], w[9], w[10], w[11], w[12], w[13]]) >> 3)
+                & MASK51,
+            (u64::from_le_bytes([w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19]]) >> 6)
+                & MASK51,
+            (u64::from_le_bytes([w[19], w[20], w[21], w[22], w[23], w[24], w[25], w[26]]) >> 1)
+                & MASK51,
+            (u64::from_le_bytes([w[24], w[25], w[26], w[27], w[28], w[29], w[30], w[31]]) >> 12)
+                & MASK51,
         ])
     }
 
@@ -502,6 +508,11 @@ fn qr(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
     s[b] = s[b].rotate_left(7);
 }
 
+fn le_u32_from_4(b: &[u8]) -> u32 {
+    // Safe helper: b is guaranteed length 4 by caller ranges
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
 fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     let mut state = [0u32; 16];
     state[0] = 0x6170_7865;
@@ -509,11 +520,13 @@ fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     state[2] = 0x7962_2d32;
     state[3] = 0x6b20_6574;
     for i in 0..8 {
-        state[4 + i] = u32::from_le_bytes(key[i * 4..i * 4 + 4].try_into().unwrap());
+        let off = i * 4;
+        state[4 + i] = le_u32_from_4(&key[off..off + 4]);
     }
     state[12] = counter;
     for i in 0..3 {
-        state[13 + i] = u32::from_le_bytes(nonce[i * 4..i * 4 + 4].try_into().unwrap());
+        let off = i * 4;
+        state[13 + i] = le_u32_from_4(&nonce[off..off + 4]);
     }
     let mut w = state;
     for _ in 0..10 {
@@ -550,6 +563,10 @@ pub fn chacha20_xor(key: &[u8; 32], counter: u32, nonce: &[u8; 12], data: &[u8])
     out
 }
 
+fn le_u64_from_8(b: &[u8]) -> u64 {
+    u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+}
+
 /// Poly1305 one-time MAC (RFC 8439 §2.5), 44-bit radix with u128 products.
 pub fn poly1305_mac(msg: &[u8], key: &[u8; 32]) -> [u8; 16] {
     const MASK44: u128 = (1u128 << 44) - 1;
@@ -565,8 +582,8 @@ pub fn poly1305_mac(msg: &[u8], key: &[u8; 32]) -> [u8; 16] {
     rb[8] &= 252;
     rb[12] &= 252;
 
-    let r_lo = u64::from_le_bytes(rb[0..8].try_into().unwrap()) as u128;
-    let r_hi = u64::from_le_bytes(rb[8..16].try_into().unwrap()) as u128;
+    let r_lo = le_u64_from_8(&rb[0..8]) as u128;
+    let r_hi = le_u64_from_8(&rb[8..16]) as u128;
     let r0 = r_lo & MASK44;
     let r1 = ((r_lo >> 44) | (r_hi << 20)) & MASK44;
     let r2 = r_hi >> 24;
@@ -582,13 +599,13 @@ pub fn poly1305_mac(msg: &[u8], key: &[u8; 32]) -> [u8; 16] {
         let mut wide = [0u8; 24];
         wide[..take].copy_from_slice(&msg[pos..pos + take]);
         wide[take] = 1;
-        let w0 = u64::from_le_bytes(wide[0..8].try_into().unwrap()) as u128;
-        let w1 = u64::from_le_bytes(wide[8..16].try_into().unwrap()) as u128;
+        let w0 = le_u64_from_8(&wide[0..8]) as u128;
+        let w1 = le_u64_from_8(&wide[8..16]) as u128;
         // wide is 24 bytes: only the low 8 of this high word can be nonzero
         // (the 0x01 pad byte lives at wide[16] when take == 16). The old
         // code called u128::from_le_bytes on an 8-byte slice and panicked
         // (audit F-06); u64 is the correct width here.
-        let w2 = u64::from_le_bytes(wide[16..24].try_into().unwrap()) as u128;
+        let w2 = le_u64_from_8(&wide[16..24]) as u128;
         let n0 = w0 & MASK44;
         let n1 = ((w0 >> 44) | (w1 << 20)) & MASK44;
         let n2 = (w1 >> 24) | (w2 << 40);
@@ -656,8 +673,8 @@ pub fn poly1305_mac(msg: &[u8], key: &[u8; 32]) -> [u8; 16] {
 
     // tag = (h + s) mod 2^128
     let hv = (f0) | (f1 << 44) | (f2 << 88);
-    let s_lo = u64::from_le_bytes(key[16..24].try_into().unwrap()) as u128;
-    let s_hi = u64::from_le_bytes(key[24..32].try_into().unwrap()) as u128;
+    let s_lo = le_u64_from_8(&key[16..24]) as u128;
+    let s_hi = le_u64_from_8(&key[24..32]) as u128;
     let s = s_lo | (s_hi << 64);
     hv.wrapping_add(s).to_le_bytes()
 }

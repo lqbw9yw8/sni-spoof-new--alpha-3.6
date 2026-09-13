@@ -1,7 +1,7 @@
 # dpi_guard (Rust)
 
 Modular DPI-evasion engine. Crate name: `dpi_guard` (GitHub repo:
-[`lqbw9yw8/sni-spoof-new--alpha-3.12`](https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.12)).
+[`lqbw9yw8/sni-spoof-new--alpha-3.6`](https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.6)).
 Windows-only for packet capture/injection (WinDivert);
 every pure-logic module builds and tests on Linux/macOS/CI.
 
@@ -16,13 +16,13 @@ control panel.
 STATUS: ۴۲۷، TEST_MATRIX: ۴۳۱). منبع حقیقت **سورس** است:
 
 ```bash
-python3 tools/gen_status.py --check   # 42 modules, 448 tests declared
+python3 tools/gen_status.py --check   # 42 modules, 449 tests declared
 python3 tools/lint_docs.py            # prose may not drift from source
 ```
 
-* **۴۴۸** تست Rust در سورس **نوشته** شده (`#[test]`). آخرین اجرای سبزِ
+* **۴۴۹** تست Rust در سورس **نوشته** شده (`#[test]`). آخرین اجرای سبزِ
   baseline ثبت‌شده ۲۰۲۶-۰۹-۰۹ روی Rust 1.98.1/لینوکس **۴۳۱ تست** بود؛
-  ۱۷ تست/تغییر تستیِ فعلی پس از آن baseline هنوز با cargo اجرا نشده‌اند
+  ۱۸ تست/تغییر تستیِ فعلی پس از آن baseline هنوز با cargo اجرا نشده‌اند
   (`cargo` در این محیط موجود نیست).
 * **۳۷۵** چک jsdom/Node داشبورد (با regression XSS، raw-TOML confirmation و انتظار boot مقاوم) — این عدد
   در همین patch در ۲۰۲۶-۰۹-۱۲ **اجرا و پاس شد** (`cd uitest && npm test`).
@@ -86,10 +86,10 @@ so a filter may whitelist the connection.
 (دکمهٔ سبز **Code → Download ZIP**):
 
 **Latest zip (branch `main`):**
-https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.12/archive/refs/heads/main.zip
+https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.6/archive/refs/heads/main.zip
 
 **Browse on GitHub:**
-https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.12/tree/main
+https://github.com/lqbw9yw8/sni-spoof-new--alpha-3.6/tree/main
 
 ZIP را باز کن. پوشه را جایی ساده بگذار، مثلاً `C:\dpi_guard`.
 
@@ -100,15 +100,15 @@ Unzip it. Put the folder somewhere simple, e.g. `C:\dpi_guard`.
 > **الف) روی خود ویندوز دابل‌کلیک:** `build-windows.bat` (Rust باید نصب باشد).
 >
 > **ب) گیت‌هاب برایت بسازد:** workflow فعالِ
-> [`.github/workflows/build-windows.yml`](.github/workflows/build-windows.yml)
-> روی هر push اجرا می‌شود. در تب **Actions**، آرتیفکت `dpi_guard-windows` را
+> [`ci/build-windows.yml`](ci/build-windows.yml)
+> روی هر push اجرا می‌شود (برای فعال‌سازی در GitHub، آن را به `.github/workflows/build-windows.yml` کپی کنید). در تب **Actions**، آرتیفکت `dpi_guard-windows` را
 > دانلود کن. WinDivert داخل آن نیست.
 >
 > There is no pre-built `.exe` in git. Run `build-windows.bat` on Windows,
-> or let the active `.github/workflows/build-windows.yml` workflow build the
-> artifact. The release workflow is tag-driven and publishes SHA-256 sums.
+> or let the active [`ci/build-windows.yml`](ci/build-windows.yml) workflow build the
+> artifact (copy to `.github/workflows/build-windows.yml` to enable on GitHub). The release workflow is tag-driven and publishes SHA-256 sums.
 > The old `ci/*.yml` files are templates kept for reference; they are not the
-> workflows GitHub executes.
+> workflows GitHub executes until copied.
 
 
 ### ۲) ساختن برنامه / Build the program
@@ -296,7 +296,7 @@ The relay listens on `127.0.0.1` only.
 This is a first pass, not a finished, field-tested tool. Two tiers:
 
 - **[IMPLEMENTED / verification-dependent]** — implementation and unit tests
-  are present in-tree; the current source declares **448** `#[test]`
+  are present in-tree; the current source declares **449** `#[test]`
   functions. This is not evidence that the current checkout was executed:
   the last recorded Rust baseline is **431/431**, while 16 current tests or
   test changes remain `[UNVERIFIED]` because this environment has no

@@ -1,5 +1,5 @@
 {
-  "commit": "d28fce9",
+  "commit": "aeeb9b5",
   "modules": {
     "anti_fingerprint": {
       "lines": 192,
@@ -9,8 +9,8 @@
       "unsafe": false
     },
     "autottl": {
-      "lines": 308,
-      "tests": 10,
+      "lines": 355,
+      "tests": 11,
       "tag": "UNTESTED",
       "win": 0,
       "unsafe": false
@@ -30,7 +30,7 @@
       "unsafe": false
     },
     "connection": {
-      "lines": 181,
+      "lines": 182,
       "tests": 7,
       "tag": "UNTESTED",
       "win": 0,
@@ -121,7 +121,7 @@
       "unsafe": false
     },
     "hpke": {
-      "lines": 1041,
+      "lines": 1058,
       "tests": 12,
       "tag": "UNTESTED",
       "win": 0,
@@ -156,7 +156,7 @@
       "unsafe": false
     },
     "main": {
-      "lines": 1408,
+      "lines": 1412,
       "tests": 7,
       "tag": null,
       "win": 8,
@@ -226,7 +226,7 @@
       "unsafe": false
     },
     "scanner": {
-      "lines": 714,
+      "lines": 720,
       "tests": 13,
       "tag": "UNTESTED",
       "win": 0,
@@ -261,7 +261,7 @@
       "unsafe": false
     },
     "stealth": {
-      "lines": 539,
+      "lines": 540,
       "tests": 17,
       "tag": "PARTIAL",
       "win": 0,

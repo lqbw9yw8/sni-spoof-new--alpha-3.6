@@ -22,6 +22,10 @@ use std::time::{Duration, Instant};
 pub const MAX_AUTO_TTL: u8 = 64;
 /// How long a learned TTL for a destination is kept.
 const LEARN_TTL: Duration = Duration::from_secs(60 * 30);
+/// Cap on the number of learned TTL entries to prevent unbounded growth
+/// from spoofed source IPs (CWE-770). Same pattern as MAX_LAST_ACTIVITY
+/// and MAX_INBOUND_TTL in pipeline.rs.
+pub const MAX_AUTO_TTL_ENTRIES: usize = 4096;
 
 /// Guess the sender's initial TTL from the observed remaining TTL.
 /// Common stacks initialise IP TTL to 64, 128, or 255. We pick the
@@ -132,9 +136,17 @@ impl AutoTtl {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.learned.len()
+    }
+
     /// Record the TTL observed on an inbound packet from `src`. Safe to call
     /// for every inbound packet; only the most recent value is kept.
+    /// Bounded by MAX_AUTO_TTL_ENTRIES to prevent spoofed-source growth.
     pub fn observe(&mut self, src: IpAddr, observed_ttl: u8, delta: i8) {
+        if !self.learned.contains_key(&src) && self.learned.len() >= MAX_AUTO_TTL_ENTRIES {
+            self.evict_oldest_half();
+        }
         let ttl = suggest_ttl(observed_ttl, delta);
         self.learned.insert(
             src,
@@ -143,6 +155,22 @@ impl AutoTtl {
                 at: Instant::now(),
             },
         );
+    }
+
+    fn evict_oldest_half(&mut self) {
+        if self.learned.len() < MAX_AUTO_TTL_ENTRIES {
+            return;
+        }
+        let mut by_age: Vec<(IpAddr, Instant)> = self
+            .learned
+            .iter()
+            .map(|(ip, l)| (*ip, l.at))
+            .collect();
+        by_age.sort_unstable_by_key(|(_, at)| *at);
+        let n = by_age.len() / 2;
+        for (ip, _) in by_age.into_iter().take(n) {
+            self.learned.remove(&ip);
+        }
     }
 
     /// Return the last learned TTL for `dst`, if fresh.
@@ -303,5 +331,24 @@ mod tests {
         assert!(c >= 1);
         // Zero ceiling is raised to 1.
         assert_eq!(suggest_ttl_scaled(56, 1, 2, 0), 1);
+    }
+
+    #[test]
+    fn auto_ttl_bounded_under_spoofed_source_flood() {
+        let mut a = AutoTtl::new();
+        // Simulate spoofed source flood: many distinct IPs
+        for i in 0..(MAX_AUTO_TTL_ENTRIES + 500) {
+            let ip: IpAddr = format!("10.0.{}.{}", (i >> 8) & 0xFF, i & 0xFF)
+                .parse()
+                .unwrap();
+            a.observe(ip, 58, 0);
+        }
+        // Must be bounded: after eviction oldest half, len <= MAX
+        assert!(
+            a.len() <= MAX_AUTO_TTL_ENTRIES,
+            "AutoTtl grew to {} > {} under spoofed-source flood",
+            a.len(),
+            MAX_AUTO_TTL_ENTRIES
+        );
     }
 }
