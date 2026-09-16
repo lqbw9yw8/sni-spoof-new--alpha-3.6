@@ -6,9 +6,13 @@
 //! can't cause the content area to resize/reflow underneath a scrollbar.
 
 use crate::config::Settings;
+use crate::scanner::{ProbeResult, SpoofCandidatePair};
 use eframe::egui;
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn run() -> eframe::Result<()> {
@@ -75,6 +79,47 @@ impl ListBuffers {
     }
 }
 
+/// One message the background scan thread sends back to the UI thread.
+enum ScanMsg {
+    /// Probe wave finished (or was cancelled). Rows are already ranked:
+    /// TLS-verified lowest-ping first.
+    Done {
+        rows: Vec<(SpoofCandidatePair, ProbeResult)>,
+        /// True when the operator asked for auto-select: the UI applies the
+        /// first TLS-verified row to the relay settings.
+        auto_select: bool,
+    },
+    /// The scan thread panicked (isolated via `catch_unwind` so the panic
+    /// can never kill the UI).
+    Failed(String),
+}
+
+/// State of the in-flight / finished SNI scanner. The actual probing runs
+/// on a background thread; the UI only ever *polls* this state, so a slow
+/// or wedged probe can never block the window (no more "Not Responding").
+#[derive(Default)]
+struct ScanState {
+    running: bool,
+    rx: Option<mpsc::Receiver<ScanMsg>>,
+    /// Shared with the scan thread: when set, no new candidate is started.
+    cancel: Arc<AtomicBool>,
+    /// Shared with the scan thread: 0..=total completed candidates.
+    progress: Arc<AtomicUsize>,
+    total: usize,
+    /// Ranked results of the last finished scan (for the results table).
+    results: Vec<(SpoofCandidatePair, ProbeResult)>,
+}
+
+impl ScanState {
+    fn reset(&mut self) {
+        self.running = false;
+        self.rx = None;
+        self.cancel = Arc::new(AtomicBool::new(false));
+        self.progress = Arc::new(AtomicUsize::new(0));
+        self.total = 0;
+    }
+}
+
 struct DpiGuardApp {
     config_path: PathBuf,
     settings: Settings,
@@ -90,6 +135,12 @@ struct DpiGuardApp {
     /// How many times the backend was auto-restarted after an unexpected
     /// exit. Bounded so a crash-looping backend cannot spin forever.
     auto_restarts: u32,
+    scan: ScanState,
+    /// True while a graceful backend stop is in flight on a background
+    /// thread (the UI must not block on it).
+    stopping: bool,
+    /// One-shot signal from the background stop thread when it finishes.
+    stop_rx: Option<mpsc::Receiver<()>>,
 }
 
 /// Top-level tabs. Each one is a fully separate page — switching tabs
@@ -131,6 +182,9 @@ impl DpiGuardApp {
             child: None,
             user_stopped: false,
             auto_restarts: 0,
+            scan: ScanState::default(),
+            stopping: false,
+            stop_rx: None,
         };
         app.logln("Desktop control panel started");
         app
@@ -231,6 +285,13 @@ impl DpiGuardApp {
     }
 
     fn start(&mut self) {
+        if self.stopping {
+            // An async stop is still finishing: its stop-file is about to be
+            // removed, and a freshly spawned backend could pick it up and
+            // immediately shut down. Wait for the stop to complete first.
+            self.message = "Waiting for the in-flight stop to finish…".into();
+            return;
+        }
         self.save();
         if self.message.starts_with("Saved") {
             if self.child.is_some() {
@@ -258,16 +319,33 @@ impl DpiGuardApp {
         }
     }
 
+    /// Non-blocking stop for the Stop button: the child is handed to a
+    /// background thread which performs the whole graceful-stop sequence
+    /// (stop file → up to 3 s poll → hard-kill fallback). The UI thread
+    /// returns immediately, so the window stays responsive while the
+    /// backend winds down; `poll_stop` reports completion next frame.
     fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            self.user_stopped = true;
+        if self.stopping {
+            self.message = "Stop already in progress…".into();
+            return;
+        }
+        let Some(child) = self.child.take() else {
+            self.message = "Not running".into();
+            return;
+        };
+        self.user_stopped = true;
+        self.stopping = true;
+        let stop_file = format!("{}.stop", self.config_path.display());
+        let (tx, rx) = mpsc::channel();
+        self.stop_rx = Some(rx);
+        std::thread::spawn(move || {
             // Graceful first (audit Cat.1): drop `<config>.stop` — the
             // backend's watcher picks it up within ~200 ms and runs its
             // full shutdown path (WinDivert close + system proxy restore).
             // A hard kill would skip the proxy restore entirely and leave
             // the operator's system proxy pointing at a dead relay.
-            let stop_file = format!("{}.stop", self.config_path.display());
             let _ = std::fs::write(&stop_file, b"stop\n");
+            let mut child = child;
             for _ in 0..60 {
                 match child.try_wait() {
                     Ok(Some(_)) => break,
@@ -282,10 +360,170 @@ impl DpiGuardApp {
             }
             let _ = child.wait();
             let _ = std::fs::remove_file(&stop_file);
+            let _ = tx.send(());
+        });
+        self.message = "Stopping backend (non-blocking)…".into();
+        self.logln("Backend engine stop requested (graceful, up to 3 s)");
+    }
+
+    /// Synchronous stop used at process exit (`on_exit`): the window is
+    /// already closing, so blocking on the full graceful-stop sequence here
+    /// is acceptable and simplest.
+    fn stop_sync(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            self.user_stopped = true;
+            let stop_file = format!("{}.stop", self.config_path.display());
+            let _ = std::fs::write(&stop_file, b"stop\n");
+            for _ in 0..60 {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    Err(_) => break,
+                }
+            }
+            if child.try_wait().map_or(true, |s| s.is_none()) {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&stop_file);
+            self.logln("Backend engine stopped");
+        }
+    }
+
+    /// Stop handler for `on_exit`: if an async stop is already in flight
+    /// (button clicked, thread still finishing), wait for it up to 10 s
+    /// instead of racing a second stop; otherwise do the sync stop.
+    fn stop_on_exit(&mut self) {
+        if self.stopping {
+            if let Some(rx) = self.stop_rx.take() {
+                for _ in 0..200 {
+                    match rx.try_recv() {
+                        Ok(()) => break,
+                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    }
+                }
+            }
+            self.stopping = false;
+            self.logln("Backend engine stopped");
+            return;
+        }
+        self.stop_sync();
+    }
+
+    // ── Background SNI scan (never blocks the UI thread) ─────────────
+
+    /// Starts the parallel SNI scan on a background thread. The UI thread
+    /// only polls; even a panicking probe thread (isolated with
+    /// `catch_unwind`) can at worst report `ScanMsg::Failed`.
+    fn start_scan(&mut self, auto_select: bool) {
+        if self.scan.running {
+            self.message = "Scan already running".into();
+            return;
+        }
+        self.scan.reset();
+        let pairs = crate::scanner::default_spoof_pairs();
+        self.scan.total = pairs.len();
+        let (tx, rx) = mpsc::channel();
+        let cancel = self.scan.cancel.clone();
+        let progress = self.scan.progress.clone();
+        std::thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::scanner::probe_and_rank_detailed_cancellable(
+                    &pairs,
+                    std::time::Duration::from_millis(1500),
+                    &cancel,
+                    &progress,
+                )
+            }));
+            let msg = match outcome {
+                Ok(rows) => ScanMsg::Done { rows, auto_select },
+                Err(_) => ScanMsg::Failed("scan thread panicked; results discarded".into()),
+            };
+            let _ = tx.send(msg);
+        });
+        self.scan.running = true;
+        self.scan.rx = Some(rx);
+        self.message = format!("Scanning {} candidates in parallel…", self.scan.total);
+        self.logln(&format!("Scan started ({} candidates, parallel, auto_select={auto_select})", self.scan.total));
+    }
+
+    /// Polls the scan channel (non-blocking). Call once per frame from
+    /// `update`; applies results / auto-select and clears the in-flight
+    /// state when the scan finishes or fails.
+    fn poll_scan(&mut self) {
+        if !self.scan.running {
+            return;
+        }
+        // Drain all pending messages (at most one is ever sent), keeping the
+        // last. Each `as_ref().try_recv()` borrow is scoped to one loop
+        // iteration, so it never overlaps the mutation below.
+        let mut msg: Option<ScanMsg> = None;
+        while let Some(rx) = self.scan.rx.as_ref() {
+            match rx.try_recv() {
+                Ok(m) => msg = Some(m),
+                Err(_) => break,
+            }
+        }
+        let Some(msg) = msg else {
+            return; // nothing yet — the 100 ms repaint keeps us ticking
+        };
+        self.scan.running = false;
+        self.scan.rx = None;
+        match msg {
+            ScanMsg::Failed(e) => {
+                self.scan.results.clear();
+                self.message = format!("Scan failed: {e}");
+                self.logln(&format!("Scan failed: {e}"));
+            }
+            ScanMsg::Done { rows, auto_select } => {
+                let total = rows.len();
+                let verified = rows.iter().filter(|(_, r)| r.tls_ok).count();
+                let chosen = rows.iter().find(|(_, r)| r.tls_ok).cloned();
+                self.scan.results = rows;
+                match chosen {
+                    Some((pair, res)) if auto_select => {
+                        let ping = res
+                            .latency_ms
+                            .map(|m| format!("{m} ms"))
+                            .unwrap_or_else(|| "n/a".into());
+                        self.settings.relay_connect_host = pair.connect_ip.clone();
+                        self.settings.relay_connect_port = pair.port;
+                        self.settings.relay_fake_sni = pair.fake_sni.clone();
+                        self.message = format!(
+                            "Auto-selected: {} → {} via {} ({}, TLS verified)",
+                            pair.provider, pair.fake_sni, pair.connect_ip, ping
+                        );
+                        self.logln(&format!(
+                            "Auto-selected relay target: {} ({})",
+                            pair.fake_sni, pair.connect_ip
+                        ));
+                    }
+                    Some(_) => {
+                        self.message =
+                            format!("Scan complete: {verified}/{total} TLS-verified. Select a row below, or run Auto-Select.")
+                    }
+                    None => {
+                        self.message =
+                            format!("Scan complete: no TLS-verified candidate in time ({total} probed).")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Polls the background stop thread (non-blocking).
+    fn poll_stop(&mut self) {
+        if !self.stopping {
+            return;
+        }
+        // The `is_some_and` borrow is scoped to the call; the mutation
+        // below never overlaps it.
+        let done = self.stop_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok());
+        if done {
+            self.stopping = false;
+            self.stop_rx = None;
             self.message = "Stopped".into();
             self.logln("Backend engine stopped");
-        } else {
-            self.message = "Not running".into();
         }
     }
 
@@ -615,89 +853,193 @@ impl DpiGuardApp {
     fn section_connection(&mut self, ui: &mut egui::Ui) {
         ui.heading("Connection");
         ui.add_space(8.0);
-        let s = &mut self.settings;
 
         ui.label(egui::RichText::new("Relay mode (v2rayN connects to dpi_guard)").strong());
         ui.separator();
-        check_row(ui, "Enable relay", &mut s.relay_enabled);
+        check_row(ui, "Enable relay", &mut self.settings.relay_enabled);
         drag_row(
             ui,
             "Relay listen port:",
-            &mut s.relay_listen_port,
+            &mut self.settings.relay_listen_port,
             1..=65_535,
             "v2rayN connects here",
         );
         text_row(
             ui,
             "Real destination (IP or domain):",
-            &mut s.relay_connect_host,
+            &mut self.settings.relay_connect_host,
             "e.g. 104.19.229.21 or auto",
         );
         drag_row(
             ui,
             "Real destination port:",
-            &mut s.relay_connect_port,
+            &mut self.settings.relay_connect_port,
             1..=65_535,
             "",
         );
         text_row(
             ui,
             "Injected fake SNI:",
-            &mut s.relay_fake_sni,
+            &mut self.settings.relay_fake_sni,
             "e.g. hcaptcha.com or auto",
         );
 
-        let mut picked: Option<(String, String, String)> = None;
-        ui.horizontal(|ui| {
-            if ui.button("⚡ Test & Select Lowest Ping Target").clicked() {
-                picked = match crate::scanner::auto_select_best_relay_target(
-                    std::time::Duration::from_millis(1500),
-                ) {
-                    Some((best_ip, best_sni)) => {
-                        let msg = format!("Selected lowest ping: {} ({})", best_sni, best_ip);
-                        Some((best_ip, best_sni, msg))
+        // ── Parallel SNI scanner (background thread — never blocks UI) ──
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("SNI scanner (parallel probe of all candidates)").strong());
+        ui.separator();
+        {
+            let scan_running = self.scan.running;
+            ui.horizontal(|ui| {
+                if scan_running {
+                    ui.spinner();
+                    let p = self.scan.progress.load(AtomicOrdering::Relaxed);
+                    ui.label(egui::RichText::new(format!(
+                        "Scanning {}/{} candidates in parallel…",
+                        p, self.scan.total
+                    ))
+                    .color(egui::Color32::from_rgb(150, 190, 255)));
+                    if ui.button("✖ Cancel").clicked() {
+                        self.scan
+                            .cancel
+                            .store(true, AtomicOrdering::Relaxed);
+                        self.message = "Cancelling scan…".into();
                     }
-                    None => Some((
-                        String::new(),
-                        String::new(),
-                        "No reachable candidate responded in time".into(),
-                    )),
-                };
-            }
-        });
-        if let Some((best_ip, best_sni, msg)) = picked {
-            s.relay_connect_host = best_ip;
-            s.relay_fake_sni = best_sni;
-            self.message = msg;
+                } else {
+                    if ui.button("⚡ Scan All & Show Results").clicked() {
+                        self.start_scan(false);
+                    }
+                    if ui.button("⭐ Auto-Select Lowest Ping").clicked() {
+                        self.start_scan(true);
+                    }
+                    if !self.scan.results.is_empty() {
+                        if ui.button("Clear results").clicked() {
+                            self.scan.results.clear();
+                            self.message = "Scan results cleared".into();
+                        }
+                    }
+                }
+            });
         }
 
-        check_row(ui, "Resolve destination via DoH", &mut s.relay_resolve_doh);
+        // Results table (owned local copy while the grid closure runs, so
+        // the row-level "Select" click can mutate self afterwards).
+        let rows = std::mem::take(&mut self.scan.results);
+        if !rows.is_empty() {
+            let best_idx = rows.iter().position(|(_, r)| r.tls_ok);
+            let mut chosen: Option<usize> = None;
+            ui.add_space(6.0);
+            egui::Grid::new("scan_results_grid")
+                .striped(true)
+                .spacing([12.0, 4.0])
+                .min_col_width(40.0)
+                .show(ui, |ui| {
+                    ui.strong("Provider");
+                    ui.strong("IP");
+                    ui.strong("Fake SNI (domain)");
+                    ui.strong("Ping");
+                    ui.strong("TLS");
+                    ui.strong("Action");
+                    ui.end_row();
+                    for (i, (pair, res)) in rows.iter().enumerate() {
+                        let (ping_text, ping_color) = match res.latency_ms {
+                            Some(ms) if ms < 100 => {
+                                (format!("{ms} ms"), egui::Color32::from_rgb(96, 220, 130))
+                            }
+                            Some(ms) if ms < 300 => {
+                                (format!("{ms} ms"), egui::Color32::from_rgb(240, 200, 90))
+                            }
+                            Some(ms) => (format!("{ms} ms"), egui::Color32::from_rgb(235, 95, 95)),
+                            None => (
+                                if res.error.as_deref() == Some("cancelled") {
+                                    "cancelled"
+                                } else {
+                                    "timeout"
+                                }
+                                .to_string(),
+                                egui::Color32::from_rgb(150, 150, 155),
+                            ),
+                        };
+                        if best_idx == Some(i) {
+                            ui.label(
+                                egui::RichText::new(format!("{}  (BEST)", pair.provider))
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(96, 220, 130)),
+                            );
+                        } else {
+                            ui.label(pair.provider.clone());
+                        }
+                        ui.label(pair.connect_ip.clone());
+                        ui.label(pair.fake_sni.clone());
+                        ui.label(
+                            egui::RichText::new(ping_text)
+                                .color(ping_color)
+                                .monospace(),
+                        );
+                        ui.label(if res.tls_ok {
+                            egui::RichText::new("OK").color(egui::Color32::from_rgb(96, 220, 130))
+                        } else {
+                            egui::RichText::new("FAIL").color(egui::Color32::from_rgb(235, 95, 95))
+                        });
+                        if ui.button("Select").clicked() {
+                            chosen = Some(i);
+                        }
+                        ui.end_row();
+                    }
+                });
+            if let Some(i) = chosen {
+                if let Some((pair, res)) = rows.get(i) {
+                    let ping = res
+                        .latency_ms
+                        .map(|m| format!("{m} ms"))
+                        .unwrap_or_else(|| "no ping".into());
+                    self.settings.relay_connect_host = pair.connect_ip.clone();
+                    self.settings.relay_connect_port = pair.port;
+                    self.settings.relay_fake_sni = pair.fake_sni.clone();
+                    self.message = format!(
+                        "Selected: {} → {} via {} ({}, TLS {})",
+                        pair.provider,
+                        pair.fake_sni,
+                        pair.connect_ip,
+                        ping,
+                        if res.tls_ok { "verified" } else { "not verified" }
+                    );
+                    self.logln(&format!(
+                        "Manual relay target selected: {} ({})",
+                        pair.fake_sni, pair.connect_ip
+                    ));
+                }
+            }
+            self.scan.results = rows;
+        }
+
+        check_row(ui, "Resolve destination via DoH", &mut self.settings.relay_resolve_doh);
         check_row(
             ui,
             "Mutate real SNI in relay stream",
-            &mut s.relay_mutate_real_sni,
+            &mut self.settings.relay_mutate_real_sni,
         );
-        check_row(ui, "Emit decoy on injection", &mut s.relay_emit_decoy);
+        check_row(ui, "Emit decoy on injection", &mut self.settings.relay_emit_decoy);
         check_row(
             ui,
             "Fail-closed (relay only with confirmed injection)",
-            &mut s.relay_require_inject,
+            &mut self.settings.relay_require_inject,
         );
 
         ui.add_space(8.0);
         ui.label(egui::RichText::new("DNS").strong());
         ui.separator();
-        text_row(ui, "DoH server:", &mut s.doh_server, "https://…/dns-query");
+        text_row(ui, "DoH server:", &mut self.settings.doh_server, "https://…/dns-query");
 
         ui.add_space(8.0);
         ui.label(egui::RichText::new("Web interface").strong());
         ui.separator();
-        check_row(ui, "Enable web dashboard", &mut s.enable_web_ui);
-        drag_row(ui, "Web UI port:", &mut s.web_ui_port, 1..=65_535, "");
+        check_row(ui, "Enable web dashboard", &mut self.settings.enable_web_ui);
+        drag_row(ui, "Web UI port:", &mut self.settings.web_ui_port, 1..=65_535, "");
         text_row(
             ui,
             "Web UI token:",
-            &mut s.web_ui_token,
+            &mut self.settings.web_ui_token,
             "16+ ASCII chars — required for GUI/service startup; empty only works with an interactive terminal",
         );
     }
@@ -863,10 +1205,15 @@ fn list_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
 
 impl eframe::App for DpiGuardApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.stop();
+        self.stop_on_exit();
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Drain background-channel state first (scan result / stop
+        // completion) so this frame already reflects it.
+        self.poll_scan();
+        self.poll_stop();
+
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -874,6 +1221,20 @@ impl eframe::App for DpiGuardApp {
                     if ui.selectable_label(self.tab == i, *name).clicked() {
                         self.tab = i;
                     }
+                }
+                if self.scan.running {
+                    ui.add_space(14.0);
+                    ui.spinner();
+                    let p = self.scan.progress.load(AtomicOrdering::Relaxed);
+                    ui.label(egui::RichText::new(format!(
+                        "Scanning {}/{} candidates in parallel…",
+                        p, self.scan.total
+                    ))
+                    .color(egui::Color32::from_rgb(150, 190, 255)));
+                } else if self.stopping {
+                    ui.add_space(14.0);
+                    ui.spinner();
+                    ui.label("Stopping backend…");
                 }
             });
             ui.add_space(2.0);
@@ -899,13 +1260,13 @@ impl eframe::App for DpiGuardApp {
                         _ => self.section_raw_toml(ui),
                     });
             });
-        // Backend-child supervision: poll the child every frame (and ask
-        // egui to keep ticking once a second even when idle) so an
-        // unexpected backend death is noticed quickly. An unexpected exit
-        // (i.e. one the operator did not request) triggers a single
-        // automatic restart; after that we surface the error and let the
-        // operator decide, so a crash-looping backend cannot spin forever.
-        if self.child.is_some() {
+        // Keep the frame loop ticking:
+        //  - while a scan or an async stop is in flight, ~10 fps so the
+        //    spinner + "Scanning n/16…" counter move smoothly;
+        //  - while the backend child is alive, 1 fps (death detection).
+        if self.scan.running || self.stopping {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        } else if self.child.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
         if self
@@ -980,6 +1341,9 @@ mod tests {
             child: None,
             user_stopped: false,
             auto_restarts: 0,
+            scan: ScanState::default(),
+            stopping: false,
+            stop_rx: None,
         };
         assert!(app.sync_lists().is_ok());
         assert_eq!(app.settings.intercept_ports, vec![443, 8443, 2053]);
@@ -1004,6 +1368,9 @@ mod tests {
             child: None,
             user_stopped: false,
             auto_restarts: 0,
+            scan: ScanState::default(),
+            stopping: false,
+            stop_rx: None,
         };
         let res = app.sync_lists();
         assert!(res.is_err());
@@ -1023,6 +1390,9 @@ mod tests {
             child: None,
             user_stopped: false,
             auto_restarts: 0,
+            scan: ScanState::default(),
+            stopping: false,
+            stop_rx: None,
         };
         app.apply_raw_toml();
         assert_eq!(app.settings.mutation_profile, "Henan");
@@ -1043,6 +1413,9 @@ mod tests {
             child: None,
             user_stopped: false,
             auto_restarts: 0,
+            scan: ScanState::default(),
+            stopping: false,
+            stop_rx: None,
         };
         app.apply_raw_toml();
         assert!(app.message.starts_with("TOML error:"));
@@ -1061,6 +1434,9 @@ mod tests {
             child: None,
             user_stopped: false,
             auto_restarts: 0,
+            scan: ScanState::default(),
+            stopping: false,
+            stop_rx: None,
         };
         for i in 0..600 {
             app.logln(&format!("entry {i}"));
@@ -1077,5 +1453,50 @@ mod tests {
         assert_eq!(TABS[3], "Connection");
         assert_eq!(TABS[4], "Advanced");
         assert_eq!(TABS[5], "Raw TOML");
+    }
+
+    #[test]
+    fn scan_state_reset_clears_state() {
+        let mut s = ScanState::default();
+        s.running = true;
+        s.total = 16;
+        let (tx, rx) = mpsc::channel::<ScanMsg>();
+        s.rx = Some(rx);
+        s.cancel.store(true, AtomicOrdering::Relaxed);
+        s.progress.store(7, AtomicOrdering::Relaxed);
+        s.results.push((
+            SpoofCandidatePair::new("p", "127.0.0.1", 443, "s.com", "d"),
+            ProbeResult {
+                candidate: "s.com".into(),
+                ip: None,
+                success: true,
+                latency_ms: Some(50),
+                tls_ok: true,
+                cert_valid: true,
+                error: None,
+            },
+        ));
+        drop(tx);
+        s.reset();
+        assert!(!s.running);
+        assert!(s.rx.is_none());
+        assert_eq!(s.total, 0);
+        assert!(!s.cancel.load(AtomicOrdering::Relaxed));
+        assert_eq!(s.progress.load(AtomicOrdering::Relaxed), 0);
+        assert!(s.results.is_empty());
+    }
+
+    #[test]
+    fn scan_msg_variants_constructible() {
+        let done = ScanMsg::Done {
+            rows: Vec::new(),
+            auto_select: false,
+        };
+        let _ = done;
+        let failed = ScanMsg::Failed("boom".into());
+        match failed {
+            ScanMsg::Failed(e) => assert!(e.contains("boom")),
+            ScanMsg::Done { .. } => panic!("wrong variant"),
+        }
     }
 }

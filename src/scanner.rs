@@ -13,6 +13,8 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 // Note: there are deliberately no SCAN_TIMEOUT/SCAN_PROBES constants here.
@@ -303,27 +305,137 @@ pub fn probe_spoof_pair(pair: &SpoofCandidatePair, timeout: Duration) -> ProbeRe
     }
 }
 
-/// Probes a slice of `SpoofCandidatePair`s with live TLS handshakes and returns them sorted by priority:
-/// verified TLS responses with lowest ping first, then timeouts.
-pub fn probe_and_rank_spoof_pairs(
+/// Maximum number of concurrent probes. 16 matches the default candidate
+/// count, so the full default list is probed in a single parallel wave.
+/// Probing never blocks on each other: total wall time ≈ slowest single
+/// handshake instead of the sum of all handshakes.
+pub const MAX_PARALLEL_PROBES: usize = 16;
+
+/// Result of one parallel probe wave. One entry per candidate, in the order
+/// the caller wants to display the rows (i.e. input order; the GUI sorts via
+/// `rank_probe_pairs` when it needs a ranked view).
+#[derive(Debug, Clone)]
+pub struct DetailedProbeOutcome {
+    pub candidate: SpoofCandidatePair,
+    pub result: ProbeResult,
+    /// True when the probe was cancelled before this candidate was reached.
+    pub skipped: bool,
+}
+
+/// Runs `probe_spoof_pair` for every candidate on a bounded worker pool
+/// (`std::thread::scope`, ≤ `MAX_PARALLEL_PROBES` workers, one wave per
+/// batch of that size).
+///
+/// - `cancel`: when set, workers stop picking up new candidates; probes
+///   already in flight finish (each is individually time-bounded by
+///   `timeout`), their results are dropped and the corresponding slots are
+///   reported as `skipped`.
+/// - `progress`: incremented after each candidate completes (0..=pairs.len()).
+/// - Returns one `DetailedProbeOutcome` per input candidate in input order.
+///
+/// NOTE: this function panics if any probe thread panics (the pool joins all
+/// workers). Callers in the UI thread must isolate it with
+/// `std::panic::catch_unwind`.
+pub fn probe_pairs_parallel(
     pairs: &[SpoofCandidatePair],
     timeout: Duration,
-) -> Vec<(SpoofCandidatePair, Option<u64>)> {
-    let mut results: Vec<(SpoofCandidatePair, ProbeResult)> = pairs
-        .iter()
-        .map(|pair| {
-            let res = probe_spoof_pair(pair, timeout);
-            (pair.clone(), res)
-        })
+    cancel: Option<&AtomicBool>,
+    progress: Option<&AtomicUsize>,
+) -> Vec<DetailedProbeOutcome> {
+    let total = pairs.len();
+    if total == 0 {
+        return Vec::new();
+    }
+    // Slots are allocated up-front (one per candidate) so a cancelled wave
+    // leaves a deterministic shape: probed slots keep their result, never-
+    // probed slots stay None and surface as `skipped: true`.
+    let slots: Vec<Mutex<Option<ProbeResult>>> = (0..total)
+        .map(|_| Mutex::new(None))
         .collect();
 
-    results.sort_by(|a, b| {
-        let (_, res_a) = a;
-        let (_, res_b) = b;
-        match (res_a.tls_ok, res_b.tls_ok) {
+    std::thread::scope(|scope| {
+        let waves = total.div_ceil(MAX_PARALLEL_PROBES);
+        for wave in 0..waves {
+            if cancel.is_some_and(|c| c.load(AtomicOrdering::Relaxed)) {
+                break;
+            }
+            let start = wave * MAX_PARALLEL_PROBES;
+            let end = (start + MAX_PARALLEL_PROBES).min(total);
+            let next = AtomicUsize::new(start);
+            for _ in 0..(end - start) {
+                let cancel = cancel;
+                let progress = progress;
+                let next = &next;
+                let slots = &slots;
+                let pairs = &pairs;
+                let timeout = timeout;
+                scope.spawn(move || loop {
+                    if cancel.is_some_and(|c| c.load(AtomicOrdering::Relaxed)) {
+                        break;
+                    }
+                    let idx = next.fetch_add(1, AtomicOrdering::Relaxed);
+                    if idx >= end {
+                        break;
+                    }
+                    let pair = &pairs[idx];
+                    // Per-candidate cancel: a probe already in flight is not
+                    // abortable (each is bounded by `timeout`), but we refuse
+                    // to start a new one and mark the slot as skipped.
+                    if cancel.is_some_and(|c| c.load(AtomicOrdering::Relaxed)) {
+                        break;
+                    }
+                    let result = probe_spoof_pair(pair, timeout);
+                    if let Ok(mut slot) = slots[idx].lock() {
+                        *slot = Some(result);
+                    }
+                    if let Some(p) = progress {
+                        p.fetch_add(1, AtomicOrdering::Relaxed);
+                    }
+                });
+            }
+        }
+    });
+
+    (0..total)
+        .map(|i| {
+            let r = slots[i]
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take());
+            match r {
+                Some(result) => DetailedProbeOutcome {
+                    candidate: pairs[i].clone(),
+                    result,
+                    skipped: false,
+                },
+                None => DetailedProbeOutcome {
+                    candidate: pairs[i].clone(),
+                    result: ProbeResult {
+                        candidate: pairs[i].fake_sni.clone(),
+                        ip: None,
+                        success: false,
+                        latency_ms: None,
+                        tls_ok: false,
+                        cert_valid: false,
+                        error: Some("cancelled".into()),
+                    },
+                    skipped: true,
+                },
+            }
+        })
+        .collect()
+}
+
+/// Ranks detailed probe outcomes for display: verified TLS responses first
+/// (lowest ping first), then timed-out/unverified candidates with a ping,
+/// then the rest. Stable sort, so equal keys keep input order.
+pub fn rank_probe_pairs(outcomes: Vec<DetailedProbeOutcome>) -> Vec<DetailedProbeOutcome> {
+    let mut out = outcomes;
+    out.sort_by(|a, b| {
+        match (a.result.tls_ok, b.result.tls_ok) {
             (true, false) => std::cmp::Ordering::Less,
             (false, true) => std::cmp::Ordering::Greater,
-            _ => match (res_a.latency_ms, res_b.latency_ms) {
+            _ => match (a.result.latency_ms, b.result.latency_ms) {
                 (Some(la), Some(lb)) => la.cmp(&lb),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -331,8 +443,50 @@ pub fn probe_and_rank_spoof_pairs(
             },
         }
     });
+    out
+}
 
-    results
+/// Probes all pairs in parallel (no cancellation, no progress counter) and
+/// returns ranked detailed outcomes.
+pub fn probe_and_rank_detailed(
+    pairs: &[SpoofCandidatePair],
+    timeout: Duration,
+) -> Vec<(SpoofCandidatePair, ProbeResult)> {
+    let outcomes = probe_pairs_parallel(pairs, timeout, None, None);
+    rank_probe_pairs(outcomes)
+        .into_iter()
+        .map(|o| (o.candidate, o.result))
+        .collect()
+}
+
+/// Probes all pairs in parallel with live cancellation + progress tracking.
+/// Used by the GUI background-scan thread.
+pub fn probe_and_rank_detailed_cancellable(
+    pairs: &[SpoofCandidatePair],
+    timeout: Duration,
+    cancel: &AtomicBool,
+    progress: &AtomicUsize,
+) -> Vec<(SpoofCandidatePair, ProbeResult)> {
+    let outcomes = probe_pairs_parallel(pairs, timeout, Some(cancel), Some(progress));
+    rank_probe_pairs(outcomes)
+        .into_iter()
+        .map(|o| (o.candidate, o.result))
+        .collect()
+}
+
+/// Probes a slice of `SpoofCandidatePair`s with live TLS handshakes and returns them sorted by priority:
+/// verified TLS responses with lowest ping first, then timeouts.
+///
+/// Implemented on top of `probe_and_rank_detailed`: all candidates are probed
+/// **in parallel** (≤ `MAX_PARALLEL_PROBES` concurrent handshakes), so the
+/// full 16-candidate default list takes ~1× the slowest handshake instead of
+/// the sum of all of them. Signature unchanged — webui/main callers keep
+/// working and simply become faster.
+pub fn probe_and_rank_spoof_pairs(
+    pairs: &[SpoofCandidatePair],
+    timeout: Duration,
+) -> Vec<(SpoofCandidatePair, Option<u64>)> {
+    probe_and_rank_detailed(pairs, timeout)
         .into_iter()
         .map(|(p, r)| (p, r.latency_ms))
         .collect()
@@ -629,6 +783,118 @@ mod tests {
         ];
         let ranked = probe_and_rank_spoof_pairs(&pairs, Duration::from_millis(50));
         assert_eq!(ranked.len(), 2);
+    }
+
+    // ---- parallel probe engine (offline: loopback/invalid targets only) ----
+
+    fn pr(sni: &str, tls_ok: bool, lat: Option<u64>, err: Option<&str>) -> ProbeResult {
+        ProbeResult {
+            candidate: sni.into(),
+            ip: None,
+            success: tls_ok,
+            latency_ms: lat,
+            tls_ok,
+            cert_valid: tls_ok,
+            error: err.map(str::to_string),
+        }
+    }
+
+    fn outcome(provider: &str, r: ProbeResult, skipped: bool) -> DetailedProbeOutcome {
+        DetailedProbeOutcome {
+            candidate: SpoofCandidatePair::new(provider, "127.0.0.1", 443, r.candidate.clone(), "t"),
+            result: r,
+            skipped,
+        }
+    }
+
+    #[test]
+    fn probe_pairs_parallel_returns_all_in_input_order() {
+        // 20 candidates (> MAX_PARALLEL_PROBES) exercises the multi-wave loop.
+        // 127.0.0.1:443 / invalid IPs never reach the network; each probe
+        // fails fast with a bounded timeout.
+        let pairs: Vec<SpoofCandidatePair> = (0..20)
+            .map(|i| {
+                SpoofCandidatePair::new(
+                    &format!("prov-{i:02}"),
+                    if i % 2 == 0 { "127.0.0.1" } else { "invalid_ip" },
+                    443,
+                    &format!("sni{i}.test"),
+                    "d",
+                )
+            })
+            .collect();
+        let progress = AtomicUsize::new(0);
+        let out = probe_pairs_parallel(&pairs, Duration::from_millis(50), None, Some(&progress));
+        assert_eq!(out.len(), 20);
+        for (i, o) in out.iter().enumerate() {
+            assert_eq!(o.candidate.provider, format!("prov-{i:02}"));
+            assert!(!o.skipped);
+            assert!(!o.result.tls_ok);
+            assert!(o.result.error.is_some());
+        }
+        assert_eq!(progress.load(AtomicOrdering::Relaxed), 20);
+    }
+
+    #[test]
+    fn probe_pairs_parallel_empty_input() {
+        let out = probe_pairs_parallel(&[], Duration::from_millis(50), None, None);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn probe_pairs_parallel_pre_cancelled_skips_everything() {
+        let pairs: Vec<SpoofCandidatePair> = (0..5)
+            .map(|i| SpoofCandidatePair::new(&format!("p{i}"), "127.0.0.1", 443, &format!("s{i}.test"), "d"))
+            .collect();
+        let cancel = AtomicBool::new(true);
+        let progress = AtomicUsize::new(0);
+        let out = probe_pairs_parallel(&pairs, Duration::from_millis(50), Some(&cancel), Some(&progress));
+        assert_eq!(out.len(), 5);
+        assert!(out.iter().all(|o| o.skipped));
+        assert_eq!(progress.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rank_probe_pairs_orders_tls_first_then_latency() {
+        let out = vec![
+            outcome("a", pr("slow-tls", true, Some(900), None), false),
+            outcome("b", pr("fast-tls", true, Some(40), None), false),
+            outcome("c", pr("fast-notls", false, Some(30), Some("timeout")), false),
+            outcome("d", pr("no-lat", false, None, Some("err")), false),
+        ];
+        let ranked = rank_probe_pairs(out);
+        let names: Vec<String> = ranked.iter().map(|o| o.candidate.provider.clone()).collect();
+        assert_eq!(names, vec!["b", "a", "c", "d"]);
+    }
+
+    #[test]
+    fn rank_probe_pairs_is_stable_for_equal_keys() {
+        let out = vec![
+            outcome("x", pr("n1", false, Some(50), None), false),
+            outcome("y", pr("n2", false, Some(50), None), false),
+            outcome("z", pr("n3", false, Some(50), None), false),
+        ];
+        let ranked = rank_probe_pairs(out);
+        let names: Vec<String> = ranked.iter().map(|o| o.candidate.provider.clone()).collect();
+        assert_eq!(names, vec!["x", "y", "z"]);
+    }
+
+    #[test]
+    fn probe_and_rank_detailed_with_offline_pairs() {
+        let pairs = vec![
+            SpoofCandidatePair::new("p1", "127.0.0.1", 443, "sni1.com", "d1"),
+            SpoofCandidatePair::new("p2", "invalid_ip", 443, "sni2.com", "d2"),
+        ];
+        let ranked = probe_and_rank_detailed(&pairs, Duration::from_millis(50));
+        assert_eq!(ranked.len(), 2);
+        assert!(ranked.iter().all(|(_, r)| !r.tls_ok));
+
+        let cancel = AtomicBool::new(false);
+        let progress = AtomicUsize::new(0);
+        let ranked2 =
+            probe_and_rank_detailed_cancellable(&pairs, Duration::from_millis(50), &cancel, &progress);
+        assert_eq!(ranked2.len(), 2);
+        assert_eq!(progress.load(AtomicOrdering::Relaxed), 2);
     }
 
     #[test]

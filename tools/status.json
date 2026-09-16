@@ -1,5 +1,5 @@
 {
-  "commit": "aeeb9b5",
+  "commit": "b94ef94",
   "modules": {
     "anti_fingerprint": {
       "lines": 192,
@@ -170,8 +170,8 @@
       "unsafe": false
     },
     "native_gui": {
-      "lines": 1082,
-      "tests": 8,
+      "lines": 1503,
+      "tests": 10,
       "tag": null,
       "win": 1,
       "unsafe": false
@@ -226,8 +226,8 @@
       "unsafe": false
     },
     "scanner": {
-      "lines": 720,
-      "tests": 13,
+      "lines": 986,
+      "tests": 19,
       "tag": "UNTESTED",
       "win": 0,
       "unsafe": false

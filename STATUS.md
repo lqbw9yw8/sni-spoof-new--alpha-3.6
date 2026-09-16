@@ -1,13 +1,62 @@
 # STATUS — تنها منبع حقیقت
 
-آخرین به‌روزرسانی: ۲۰۲۶/۰۹/۱۲ · Rust last-run baseline: `07f2ddc` + ممیزی SENTRY؛ cargo/Windows هنوز `[UNVERIFIED]`
+آخرین به‌روزرسانی: ۲۰۶/۰۹/۱۶ · Rust last-run baseline: `07f2ddc` + ممیزی SENTRY؛ cargo/Windows هنوز `[UNVERIFIED]`
 
 > این فایل **تنها** مرجع وضعیت پروژه است. اگر فایل دیگری ادعای مغایری
 > دارد، آن فایل قدیمی است. اسناد تاریخی در `docs/archive/`.
 
 ---
 
-## تغییرات این نوبت — ۲۰۲۶/۰۹/۱۲
+## تغییرات این نوبت — ۲۰۶/۰۹/۱۶ — `PARTIAL_UNVERIFIED` (Rust در این محیط `NOT TESTED`)
+
+- **رفع هنگ UI هنگام اسکن (hang fix):** `src/scanner.rs` — پروب ۱۶ کاندید دیگر
+  توالی نیست. موتور جدید `probe_pairs_parallel` روی worker pool با
+  `std::thread::scope` اجرا می‌شود (حداکثر `MAX_PARALLEL_PROBES = 16` پروب
+  هم‌زمان، wave‌به-wave). زمان کل ≈ کندترین handshake واحد (~۱.۵ s) به‌جای
+  مجموع همهٔ handshakeها (~۲۴ s). APIهای عمومی قدیمی
+  (`probe_and_rank_spoof_pairs`، `best_spoof_pair`) امضای بدون‌تغییر دارند و
+  خودکار موازی شدند — callers در `webui.rs`/`main.rs` بدون ویرایش همان سرعت
+  جدید را می‌گیرند. تابع‌های جدید: `rank_probe_pairs` (ترتیب‌بندی پایدار:
+  TLS-verified اول، بعد کمترین ping)، `probe_and_rank_detailed` و
+  `probe_and_rank_detailed_cancellable` (لغو زنده + شمارندهٔ progress).
+- **اسکن پس‌زمینه در GUI:** `src/native_gui.rs` — دکمه‌های
+  «⚡ Scan All & Show Results» و «⭐ Auto-Select Lowest Ping» اسکن را در
+  `std::thread::spawn` با `mpsc::channel` اجرا می‌کنند؛ UI هرگز block
+  نمی‌شود (خاموشی/Not Responding هنگام اسکن دیگر رخ نمی‌دهد). spinner +
+  شمارندهٔ زنده «Scanning n/16…» هم در نوار بالا و هم در تابلوی
+  Connection؛ دکمهٔ «✖ Cancel» (آتمیک: workerها پروب تازه‌ای شروع نمی‌کنند؛
+  پروب‌های در حال اجرا تا سقف ۱.۵s خود را تمام می‌کنند)؛
+  `catch_unwind(AssertUnwindSafe)` دور کل اسکن، پس پانیکِ thread اسکن
+  نمی‌تواند UI را بکشد (به‌جای crash، پیام «Scan failed» می‌شود)؛
+  `request_repaint_after(100ms)` فقط در حالت اسکن/stop فعال است وگرنه ریتم
+  قبلی (۱s) برمی‌گردد.
+- **Stop بدون block:** توقف backend دیگر ۳ ثانیه UI thread را ختم نمی‌کند.
+  `stop()` child را به thread پس‌زمینه واگذار می‌کند (نوشتن stop-file →
+  `try_wait` ×۶۰ با فاصلهٔ ۵۰ms → fallback به `kill`) و UI با `poll_stop()`
+  پایان را می‌بیند. `on_exit` اگر stopی در حال پرواز باشد حداکثر ۱۰s روی
+  همان thread می‌ماند، وگرنه `stop_sync` همگام کلاسیک را انجام می‌دهد.
+- **جدول دامنه‌ها + انتخاب دستی:** نتایج اسکن در تابلوی Connection به‌صورت
+  جدول نمایش داده می‌شود: Provider | IP | Fake SNI (domain) | Ping | TLS |
+  Action. رنگ ping: سبز <۱۰۰ms، زرد <۳۰۰ms، قرمز ≥۳۰۰ms، خاکستری
+  timeout/cancelled (متن رنگی؛ از emoji وابسته به فونت استفاده نشد تا در
+  فونت پیش‌فرض egui tofu نشود). ردیف برتر (اولین ردیف TLS-verified) با
+  «(BEST)» مشخص است. دکمهٔ «Select» هر ردیف، `relay_connect_host` +
+  `relay_connect_port` + `relay_fake_sni` را پر می‌کند؛ «Auto-Select» همان
+  ردیف BEST را خودکار اعمال می‌کند؛ «Clear results» جدول را خالی می‌کند.
+- **تست‌های جدید (۸):** ۶ تست آفلاین موتور موازی در `scanner.rs` (نگه‌داشتن
+  ترتیب ورودی + progress برای ۲۰ کاندید = دو wave، ورودی خالی، cancel پیشین
+  = همهٔ slots به‌عنوان skipped، ترتیب TLS-اول-سپس-ping، ثبات مرتب‌سازی،
+  ورود از APIهای عمومی) و ۲ تست GUI در `native_gui.rs` (reset کامل
+  `ScanState`، ساخت variants `ScanMsg`). مجموع تست‌های اعلام‌شده: ۴۴۹ → ۴۵۷.
+- **مدرک اجرا (این محیط، ۲۰۲۶/۰۹/۱۶):** `cd uitest && npm test` → **۳۷۵
+  passed، ۰ failed** ✅؛ `python3 tools/gen_status.py --check` → up to date
+  ✅؛ `python3 tools/lint_docs.py` → ۰ parity violations ✅؛ اعتبارسنجی
+  syntax تمام فایل‌های Rust تغییریافته با parser درخت‌نحوی
+  (tree-sitter-rust روی node) → بدون خطای grammar ✅. **cargo/rustc در این
+  محیط موجود نیست؛ `cargo build`/`cargo test` در این نوبت اجرا نشد — کد Rust
+  `NOT TESTED` است و باید روی ویندوز (build-windows.bat) یا CI اجرا شود.**
+
+## تغییرات دور ۲۰۲/۰۹/۲
 
 - **WFP:** `src/dns_guard.rs` از spec/stub به FFI واقعی `Fwpuclnt.dll` تبدیل شد.
   نصب چهار filter در یک transaction انجام می‌شود: permit برای `127.0.0.1` و
@@ -29,7 +78,7 @@
   نیز پاس شدند. cargo/rustc در محیط موجود نیستند و Windows/WinDivert E2E،
   fuzz و signing `[UNVERIFIED]` باقی می‌مانند.
 
-## ⚠️ وضعیت کلی پروژه: `JS_VERIFIED_2026-09-12 / RUST_LAST_RUN_2026-09-09 / REAL_WIN_PENDING`
+## ⚠️ وضعیت کلی پروژه: `JS_VERIFIED_2026-09-16 / RUST_LAST_RUN_2026-09-09 / REAL_WIN_PENDING`
 
 **توضیح وضعیت:** سوئیت کامل jsdom/Node داشبورد در همین patch در
 ۲۰۲۶-۰۹-۱۲ **واقعاً اجرا شد**: ۳۷۵ چک، ۰ شکست (شامل regression XSS،
@@ -47,17 +96,22 @@ Rust 1.98.1 (لینوکس) اجرا و سبز شد؛ در محیط ممیزی ۲
 cargo fmt --all -- --check   # clean
 cargo clippy --all-targets -- -D warnings   # 0 error
 cargo test --all-targets     # آخرین اجرای قبل از پچ‌های SENTRY: 431 passed; 0 failed
-python3 tools/gen_status.py  # current source: 42 modules, 449 tests declared, 0 dead fns
+python3 tools/gen_status.py  # current source: 42 modules, 457 tests declared, 0 dead fns
 
 # اجرای واقعی در ممیزی ۲۰۲۶-۰۹-۱۳ این patch:
 cd uitest && npm test                       # 375 passed; 0 failed  ✅
 python3 tools/gen_status.py --check        # up to date            ✅
 python3 tools/lint_docs.py                 # 0 parity violations   ✅
+
+# اجرای واقعی این نوبت (۲۰/۰/۱ — cargo/rustc در محیط نبود):
+cd uitest && npm test                       # 375 passed; 0 failed  ✅
+python3 tools/gen_status.py --check        # up to date (457)      ✅
+python3 tools/lint_docs.py                 # 0 parity violations   ✅
 ```
 
 > ⚠️ عددهای ۳۴۴، ۳۶۹، ۴۲۷ و ۴۳۱ که پیش‌تر در اسناد بودند تاریخی‌اند
-> و برای ادعاهای فعلی استفاده نمی‌شوند. `tools/gen_status.py` اکنون **۴۴۹**
-> تست اعلام‌شده را گزارش می‌کند؛ ۱۸ تست/تغییر تستیِ پس از baseline در این
+> و برای ادعاهای فعلی استفاده نمی‌شوند. `tools/gen_status.py` اکنون **۴۵۷**
+> تست اعلام‌شده را گزارش می‌کند؛ ۲۶ مورد تست/تغییر تستیِ پس از baseline در این
 > checkout هنوز با cargo اجرا نشده‌اند.
 
 ---
@@ -124,9 +178,9 @@ ECH واقعی از نظر ریاضی خراب بود؛ ریشه‌ها با ش�
 
 > **⬆️ تکمیل‌شده در دور ممیزی ۲۰۲۶-۰۹-۰۹:** این دور اکنون اجرا شد —
 > ۹ شکست (عمدتاً ریاضیاتِ `hpke.rs`) پیدا و رفع شد؛ جدول بالا برای
-> مرور تاریخی نگه داده شده است. اعداد فعلی: **۴۴۹ تست اعلام‌شده در سورس و
+> مرور تاریخی نگه داده شده است. اعداد فعلی: **۴۵۷ تست اعلام‌شده در سورس و
 > ۴۲ ماژول**؛ آخرین اجرای سبزِ baseline در ۲۰۲۶-۰۹-۰۹، ۴۳۱ تست تاریخی بود؛
-> ۱۸ تست/تغییر پس از آن baseline هنوز با cargo اجرا نشده‌اند. clippy = ۰ و fmt = پاک
+> ۲۶ مورد تست/تغییر پس از آن baseline هنوز با cargo اجرا نشده‌اند. clippy = ۰ و fmt = پاک
 > مربوط به همان baseline هستند. جزئیات در بخش «ممیزی Master Prompt V2» بالای همین فایل.
 
 **تداخل‌های رفع‌شده در حسابرسی هماهنگی:**
@@ -164,8 +218,8 @@ ECH واقعی از نظر ریاضی خراب بود؛ ریشه‌ها با ش�
 | معیار | مقدار |
 |---|---:|
 | ماژول‌های Rust | **۴۲** (طبق `tools/gen_status.py`) |
-| `#[test]` تعریف‌شده در کد Rust | **۴۴۹** (طبق `tools/gen_status.py`) |
-| تست‌های **آخرین اجرای ثبت‌شده و پاس‌شده** (cargo test، لینوکس) | **۴۳۱ از ۴۳۱** ✅؛ ۱۸ تست/تغییر پس از آن [UNVERIFIED] |
+| `#[test]` تعریف‌شده در کد Rust | **۴۵۷** (طبق `tools/gen_status.py`) |
+| تست‌های **آخرین اجرای ثبت‌شده و پاس‌شده** (cargo test، لینوکس) | **۴۳۱ از ۴۳۱** ✅؛ ۲۶ مورد تست/تغییر پس از آن [UNVERIFIED] |
 | توابع بدون هیچ فراخوان (Dead Functions) | **۰** ✅ (استاتیک) |
 | هشدار خطای clippy (-D warnings، --all-targets) | **۰** ✅ (اجرای ۲۰۲۶-۰۹-۰۹) |
 | `cargo fmt --check` | **پاک** ✅ (اجرای ۲۰۲۶-۰۹-۰۹) |

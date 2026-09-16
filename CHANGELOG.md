@@ -9,6 +9,50 @@
 Baseline source release. Publish only after the Windows CI/release workflow
 has produced and verified the signed/checksummed artifact.
 
+## [Unreleased] — GUI no longer hangs: parallel scan, background thread, non-blocking stop, results table (۲۰۲۶-۰۹-۱۶) — `PARTIAL_UNVERIFIED`
+
+- **`src/scanner.rs` — پروب موازی به‌جای توالی (رفع هنگ ~۲۴ ثانیه‌ای):**
+  `probe_pairs_parallel` همهٔ کاندیدها را روی worker pool با `std::thread::scope`
+  پروب می‌کند (حداکثر `MAX_PARALLEL_PROBES = 16` هم‌زمان، wave‌به-wave)؛ زمان
+  کل ≈ کندترین handshake واحد (~۱.۵s) به‌جای مجموع همه (~۲۴s). پشتیبانی
+  لغو زنده (`cancel: Option<&AtomicBool>`) و شمارندهٔ پیشرفت
+  (`progress: Option<&AtomicUsize>`). ترتیب‌بندی جدا شد:
+  `rank_probe_pairs` (پایدار: TLS-verified اول، بعد کمترین ping) و APIهای
+  جدید `probe_and_rank_detailed` / `probe_and_rank_detailed_cancellable`.
+  **امضای `probe_and_rank_spoof_pairs` و `best_spoof_pair` بدون تغییر ماند** —
+  callers در `webui.rs` و `main.rs` بدون ویرایش، خودکار موازی شدند.
+- **`src/native_gui.rs` — اسکن روی thread پس‌زمینه (UI دیگر block نمی‌شود):**
+  دکمه‌های «⚡ Scan All & Show Results» و «⭐ Auto-Select Lowest Ping» اسکن را
+  در `std::thread::spawn` + `mpsc::channel` اجرا می‌کنند؛
+  `catch_unwind(AssertUnwindSafe)` دور کل اسکن (پانیک نمی‌تواند UI را بکشد؛
+  پیام «Scan failed» می‌شود)؛ spinner + شمارندهٔ زندهٔ «Scanning n/16…» در
+  نوار بالا و تابلوی Connection؛ دکمهٔ «✖ Cancel»؛
+  `request_repaint_after(100ms)` فقط هنگام اسکن/stop (وگرنه ریتم ۱s قبلی).
+- **`src/native_gui.rs` — Stop بدون block:** `stop()` دیگر ۳ ثانیه UI thread
+  را خواب نمی‌اندازد؛ child به thread پس‌زمینه می‌رود (stop-file →
+  `try_wait`×۶۰ → `kill` fallback) و `poll_stop()` پایان را به UI می‌رساند.
+  `on_exit` در صورت stop در‌حالت‌پرواز تا ۱۰s منتظر همان thread می‌ماند،
+  وگرنه `stop_sync` همگام را می‌زند.
+- **`src/native_gui.rs` — جدول دامنه‌ها + انتخاب دستی (درخواست مستقیم کاربر):**
+  نتایج اسکن در تابلوی Connection به‌صورت جدول
+  Provider | IP | Fake SNI (domain) | Ping | TLS | Action نمایش می‌شود؛
+  رنگ ping (سبز <۱۰۰ms، زرد <۳۰۰ms، قرمز ≥۳۰۰ms، خاکستری timeout) با متن
+  رنگی به‌جای emoji فونت‌وابسته؛ ردیف برتر با «(BEST)»؛ دکمهٔ «Select» هر
+  ردیف `relay_connect_host`/`relay_connect_port`/`relay_fake_sni` را پر
+  می‌کند؛ Auto-Select ردیف BEST را اعمال می‌کند؛ «Clear results» پاک می‌کند.
+- **تست‌ها (۸ مورد جدید، همه آفلاین):** ۶ مورد برای موتور موازی
+  `scanner.rs` (ترتیب/progress برای ۲۰ کاندید = دو wave، ورودی خالی،
+  cancel پیشین، ترتیب TLS-اول-سپس-ping، ثبات sort، ورود از APIهای عمومی)
+  و ۲ مورد GUI در `native_gui.rs` (reset `ScanState`، variants `ScanMsg`).
+  مجموع اعلام‌شده: ۴۴۹ → ۴۵۷.
+- **مدرک اجرا در این sandbox (بدون cargo/rustc):** `cd uitest && npm test`
+  ۳۷۵ پاس/۰ شکست ✅؛ `gen_status.py --check` ✅؛ `lint_docs.py` ۰ نقص ✅؛
+  syntax-check tree-sitter برای فایل‌های Rust تغییریافته ✅. **`cargo
+  build`/`cargo test` در این نوبت اجرا نشد — Rust `NOT TESTED`؛** اجرای واقعی
+  روی ویندوز (build-windows.bat) یا CI لازم است.
+- Rollback: revert این پچ؛ APIهای قدیمی scanner امضای قبلی خود را دارند،
+  پس هیچ caller دیگری آسیب نمی‌بیند.
+
 ## [Unreleased] — Restoring `.cargo/config.toml`, the third lost file (۲۰۲۶-۰۹-۱۳) — `PARTIAL_UNVERIFIED`
 
 - **`.cargo/config.toml` بازسازی شد** — سومین فایلی که آپلود squash جا گذاشت
